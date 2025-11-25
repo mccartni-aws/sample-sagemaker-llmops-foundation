@@ -1,0 +1,162 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "ESG Benchmarking SageMaker Project Template"
+
+Parameters:
+  SageMakerProjectName:
+    Type: String
+    Description: Name of the SageMaker project
+    MinLength: 1
+    MaxLength: 32
+
+  SageMakerProjectId:
+    Type: String
+    Description: Service generated Id of the project
+
+  SageMakerProjectDescription:
+    Type: String
+    Description: Description of the SageMaker project
+    Default: "ESG Benchmarking MLOps Project"
+
+Resources:
+  ModelPackageGroup:
+    Type: AWS::SageMaker::ModelPackageGroup
+    Properties:
+      ModelPackageGroupName: !Sub "${SageMakerProjectName}-models"
+      ModelPackageGroupDescription: "Model package group for ESG benchmarking models"
+      Tags:
+        - Key: "sagemaker:project-id"
+          Value: !Ref SageMakerProjectId
+        - Key: "sagemaker:project-name"
+          Value: !Ref SageMakerProjectName
+        - Key: "sagemaker:studio-visibility"
+          Value: "true"
+        - Key: "sagemaker:project-type"
+          Value: "MLOps"
+
+  # Add S3 bucket for project artifacts
+  ProjectArtifactsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${SageMakerProjectName}-${SageMakerProjectId}-artifacts"
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      # Security fix: Add server-side encryption
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+            BucketKeyEnabled: true
+      # Security fix: Add access logging (W35 compliance)
+      LoggingConfiguration:
+        DestinationBucketName: !Ref AccessLogsBucket
+        LogFilePrefix: "access-logs/"
+      Tags:
+        - Key: "sagemaker:project-id"
+          Value: !Ref SageMakerProjectId
+        - Key: "sagemaker:project-name"
+          Value: !Ref SageMakerProjectName
+        - Key: "sagemaker:studio-visibility"
+          Value: "true"
+
+  # Security fix: Add bucket policy for main bucket
+  ProjectArtifactsBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref ProjectArtifactsBucket
+      PolicyDocument:
+        Statement:
+          - Sid: DenyInsecureConnections
+            Effect: Deny
+            Principal: "*"
+            Action: "s3:*"
+            Resource:
+              - !Sub "arn:aws:s3:::${ProjectArtifactsBucket}/*"
+              - !Sub "arn:aws:s3:::${ProjectArtifactsBucket}"
+            Condition:
+              Bool:
+                "aws:SecureTransport": "false"
+          - Sid: AllowSageMakerAccess
+            Effect: Allow
+            Principal:
+              Service: sagemaker.amazonaws.com
+            Action:
+              - "s3:GetObject"
+              - "s3:PutObject"
+              - "s3:DeleteObject"
+              - "s3:ListBucket"
+            Resource:
+              - !Sub "arn:aws:s3:::${ProjectArtifactsBucket}/*"
+              - !Sub "arn:aws:s3:::${ProjectArtifactsBucket}"
+
+  # Security fix: Add access logs bucket
+  AccessLogsBucket:
+    Type: AWS::S3::Bucket
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W35
+            reason: This is the access logs sink; enabling logging would require a second sink bucket.
+    Properties:
+      BucketName: !Sub "${SageMakerProjectName}-${SageMakerProjectId}-access-logs"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteAccessLogsAfter90Days
+            Status: Enabled
+            ExpirationInDays: 90
+      Tags:
+        - Key: "sagemaker:project-id"
+          Value: !Ref SageMakerProjectId
+        - Key: "sagemaker:project-name"
+          Value: !Ref SageMakerProjectName
+        - Key: "sagemaker:studio-visibility"
+          Value: "true"
+
+  AccessLogsBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref AccessLogsBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: "s3:*"
+            Resource:
+              - !GetAtt AccessLogsBucket.Arn
+              - !Sub "${AccessLogsBucket.Arn}/*"
+            Condition:
+              Bool:
+                aws:SecureTransport: "false"
+
+          - Sid: DenyUnencryptedObjectUploads
+            Effect: Deny
+            Principal: "*"
+            Action: "s3:PutObject"
+            Resource: !Sub "${AccessLogsBucket.Arn}/*"
+            Condition:
+              StringNotEqualsIfExists:
+                s3:x-amz-server-side-encryption: "AES256"
+
+Outputs:
+  ModelPackageGroupName:
+    Description: Name of the created model package group
+    Value: !Ref ModelPackageGroup
+
+  ProjectArtifactsBucketName:
+    Description: Name of the project artifacts S3 bucket
+    Value: !Ref ProjectArtifactsBucket

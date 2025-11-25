@@ -1,0 +1,11 @@
+# Core libraries
+transformers>=4.40.0
+peft>=0.17.1
+bitsandbytes>=0.42.0
+safetensors>=0.4.0
+huggingface_hub>=0.22.0
+
+# Helpful but optional
+accelerate>=0.30.0
+sentencepiece   # no version pin, often needed for Mistral/LLaMA tokenizers
+boto3

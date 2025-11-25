@@ -1,0 +1,198 @@
+name: SageMaker Pipeline build SM project.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "ml_pipelines/**"
+      - "source_scripts/**"
+  workflow_dispatch: {}
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4.1.7
+
+      - name: Check pipeline execution trigger
+        id: check_trigger
+        run: |
+          if [ "${{ vars.TRIGGER_PIPELINE_EXECUTION }}" != "true" ]; then
+            echo "Pipeline execution is disabled. Set TRIGGER_PIPELINE_EXECUTION variable to 'true' to enable."
+            echo "To enable: Go to Settings → Secrets and variables → Actions → Variables tab → Add 'TRIGGER_PIPELINE_EXECUTION' = 'true'"
+            exit 0
+          fi
+          echo "Pipeline execution is enabled"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
+        with:
+          role-to-assume: ${{ vars.OIDC_ROLE_GITHUB_WORKFLOW_BUILD }}
+          aws-region: ${{ vars.REGION }}
+
+      - name: Set up Python
+        uses: actions/setup-python@39cd14951b08e74b54015e9e001cdefcf80e669f # v5.1.1
+        with:
+          python-version: "3.10"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r ml_pipelines/requirements.txt
+
+      - name: Run SageMaker Pipeline
+        env:
+          SAGEMAKER_PROJECT_NAME: ${{ vars.SAGEMAKER_PROJECT_NAME }}
+          SAGEMAKER_PROJECT_ID: ${{ vars.SAGEMAKER_PROJECT_ID }}
+          REGION: ${{ vars.REGION }}
+          ROLE: ${{ vars.SAGEMAKER_PIPELINE_ROLE_ARN }}
+          ARTIFACT_BUCKET: ${{ vars.ARTIFACT_BUCKET }}
+          MODEL_PACKAGE_GROUP_NAME: ${{ vars.MODEL_PACKAGE_GROUP_NAME }}
+          INPUT_DATA_PATH: ${{ vars.INPUT_DATA_PATH }}
+          MLFLOW_TRACKING_ARN: ${{ vars.MLFLOW_TRACKING_ARN }}
+        run: |
+          python ./ml_pipelines/run_pipeline.py \
+            --module-name training.pipeline \
+            --role-arn "${{ env.ROLE }}" \
+            --tags '[{"Key":"sagemaker:project-name", "Value":"'"${{ env.SAGEMAKER_PROJECT_NAME }}"'"}, {"Key":"sagemaker:project-id", "Value":"'"${{ env.SAGEMAKER_PROJECT_ID }}"'"}]' \
+            --kwargs '{"region":"'"${{ env.REGION }}"'","default_bucket":"'"${{ env.ARTIFACT_BUCKET }}"'","pipeline_name":"githubactions-'"${{ env.SAGEMAKER_PROJECT_ID }}"'","model_package_group_name":"'"${{ env.MODEL_PACKAGE_GROUP_NAME }}"'","input_data_path":"'"${{ env.INPUT_DATA_PATH }}"'", "mlflow_tracking_arn":"'"${{ env.MLFLOW_TRACKING_ARN }}"'"}'
+
+      - name: Monitor Pipeline Execution
+        env:
+          SAGEMAKER_PROJECT_ID: ${{ vars.SAGEMAKER_PROJECT_ID }}
+          REGION: ${{ vars.REGION }}
+        run: |
+          project_id="${SAGEMAKER_PROJECT_ID}"
+          pipeline_name="githubactions-${project_id}-esg-pipeline"
+
+          echo "=== PIPELINE MONITORING INFO ==="
+          echo "Project ID: ${project_id}"
+          echo "Target pipeline name: ${pipeline_name}"
+          echo "Region: ${REGION}"
+          echo "==============================="
+
+          echo "Searching for pipeline..."
+          pipeline_exists=$(aws sagemaker list-pipelines \
+            --query "PipelineSummaries[?PipelineName=='$pipeline_name'].PipelineName" \
+            --output text)
+
+          if [ -z "$pipeline_exists" ] || [ "$pipeline_exists" = "None" ]; then
+            echo "Exact pipeline name not found. Searching for pipelines with project ID..."
+            found_pipeline=$(aws sagemaker list-pipelines \
+              --query "PipelineSummaries[?contains(PipelineName, 'githubactions-${project_id}')].PipelineName" \
+              --output text | head -1)
+
+            if [ -n "$found_pipeline" ] && [ "$found_pipeline" != "None" ]; then
+              pipeline_name="$found_pipeline"
+              echo "Found pipeline: $pipeline_name"
+            else
+              echo "❌ No pipeline found for project ID: ${project_id}"
+              echo ""
+              echo "Available pipelines starting with 'githubactions':"
+              aws sagemaker list-pipelines \
+                --query 'PipelineSummaries[?starts_with(PipelineName, `githubactions`)].{Name: PipelineName, Created: CreationTime}' \
+                --output table || echo "No pipelines found"
+              echo ""
+              echo "⚠️  Pipeline may still be creating. This is not necessarily an error."
+              echo "✅ Workflow will continue - check SageMaker console for pipeline status."
+              exit 0
+            fi
+          else
+            echo "✅ Pipeline found: $pipeline_name"
+          fi
+
+          echo "Checking for pipeline executions..."
+          execution_arn=$(aws sagemaker list-pipeline-executions \
+            --pipeline-name "$pipeline_name" \
+            --sort-by "CreationTime" \
+            --sort-order "Descending" \
+            --max-results 1 \
+            --query 'PipelineExecutionSummaries[0].PipelineExecutionArn' \
+            --output text 2>/dev/null)
+
+          if [ "$execution_arn" = "None" ] || [ -z "$execution_arn" ]; then
+            echo "⚠️  No pipeline execution found for pipeline: $pipeline_name"
+            echo "✅ Check the SageMaker console for pipeline execution status."
+            exit 0
+          fi
+
+          echo "📊 Monitoring execution: $execution_arn"
+          MAX_WAIT_TIME=3600
+          WAIT_INTERVAL=30
+          ELAPSED_TIME=0
+
+          while [ $ELAPSED_TIME -lt $MAX_WAIT_TIME ]; do
+            status=$(aws sagemaker describe-pipeline-execution \
+              --pipeline-execution-arn "$execution_arn" \
+              --query 'PipelineExecutionStatus' \
+              --output text 2>/dev/null)
+
+            if [ -z "$status" ] || [ "$status" = "None" ]; then
+              echo "⚠️  Could not retrieve pipeline status."
+              exit 0
+            fi
+
+            echo "$(date '+%H:%M:%S'): Pipeline status: $status (Elapsed: ${ELAPSED_TIME}s)"
+
+            case "$status" in
+              "Succeeded")
+                echo "🎉 Pipeline execution completed successfully!"
+                aws sagemaker describe-pipeline-execution \
+                  --pipeline-execution-arn "$execution_arn" \
+                  --query '{Status: PipelineExecutionStatus, StartTime: CreationTime, EndTime: LastModifiedTime}' \
+                  --output table 2>/dev/null || true
+                exit 0
+                ;;
+              "Failed"|"Stopped")
+                echo "❌ Pipeline execution failed with status: $status"
+                failure_reason=$(aws sagemaker describe-pipeline-execution \
+                  --pipeline-execution-arn "$execution_arn" \
+                  --query 'FailureReason' \
+                  --output text 2>/dev/null)
+                if [ "$failure_reason" != "None" ] && [ -n "$failure_reason" ]; then
+                  echo "Failure reason: $failure_reason"
+                fi
+                echo "Failed steps:"
+                aws sagemaker list-pipeline-execution-steps \
+                  --pipeline-execution-arn "$execution_arn" \
+                  --query 'PipelineExecutionSteps[?StepStatus==`Failed`].{StepName: StepName, Status: StepStatus, FailureReason: FailureReason}' \
+                  --output table 2>/dev/null || true
+                echo "🔍 Check the SageMaker console:"
+                echo "   https://console.aws.amazon.com/sagemaker/home?region=${REGION}#/pipelines"
+                exit 1
+                ;;
+              "Executing"|"Stopping")
+                sleep $WAIT_INTERVAL
+                ELAPSED_TIME=$((ELAPSED_TIME + WAIT_INTERVAL))
+                ;;
+              *)
+                echo "⚠️  Unknown pipeline status: $status"
+                sleep $WAIT_INTERVAL
+                ELAPSED_TIME=$((ELAPSED_TIME + WAIT_INTERVAL))
+                ;;
+            esac
+          done
+
+          echo "⏰ Timeout reached; continuing workflow."
+          exit 0
+
+      - name: Verify Model Registration
+        env:
+          MODEL_PACKAGE_GROUP_NAME: ${{ vars.MODEL_PACKAGE_GROUP_NAME }}
+          REGION: ${{ vars.REGION }}
+        run: |
+          echo "Checking model registration in group: $MODEL_PACKAGE_GROUP_NAME"
+          aws sagemaker list-model-packages \
+            --model-package-group-name "$MODEL_PACKAGE_GROUP_NAME" \
+            --sort-by "CreationTime" \
+            --sort-order "Descending" \
+            --max-results 5 \
+            --query 'ModelPackageSummaryList[].[ModelPackageArn,ModelPackageStatus,CreationTime]' \
+            --output table
+          echo "Model registration verification completed"

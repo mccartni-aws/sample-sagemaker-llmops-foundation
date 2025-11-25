@@ -1,0 +1,286 @@
+name: Deploy SageMaker Endpoint
+
+on:
+    workflow_dispatch:
+        inputs:
+            model_package_arn:
+                description: "Model Package ARN to deploy"
+                required: true
+                type: string
+            environment:
+                description: "Deployment environment"
+                required: true
+                type: choice
+                options:
+                    - dev
+                    - staging
+                    - prod
+                default: "dev"
+    repository_dispatch:
+        types: [model-approved]
+
+permissions:
+    id-token: write
+    contents: read
+
+jobs:
+    deploy:
+        runs-on: ubuntu-latest
+        environment: ${{ github.event.inputs.environment || 'dev' }}
+
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4.1.7
+
+            - name: Configure AWS credentials
+              uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
+              with:
+                  role-to-assume: ${{ vars.OIDC_ROLE_GITHUB_WORKFLOW_DEPLOY }}
+                  aws-region: ${{ vars.REGION }}
+
+            - name: Set up Python
+              uses: actions/setup-python@39cd14951b08e74b54015e9e001cdefcf80e669f # v5.1.1
+              with:
+                  python-version: "3.10"
+
+            - name: Install dependencies
+              run: |
+                  python -m pip install --upgrade pip
+                  pip install -r requirements.txt
+
+            - name: Get approved model package
+              id: get_model
+              env:
+                  MODEL_PACKAGE_GROUP_NAME: ${{ vars.MODEL_PACKAGE_GROUP_NAME }}
+                  MODEL_PACKAGE_ARN: ${{ github.event.inputs.model_package_arn || github.event.client_payload.model_package_arn }}
+                  REGION: ${{ vars.REGION }}
+              run: |
+                  if [ -n "$MODEL_PACKAGE_ARN" ]; then
+                    echo "Using provided model package ARN: $MODEL_PACKAGE_ARN"
+                    echo "model_package_arn=$MODEL_PACKAGE_ARN" >> $GITHUB_OUTPUT
+                  else
+                    echo "Fetching latest approved model package from group: $MODEL_PACKAGE_GROUP_NAME"
+
+                    # Get the latest approved model package
+                    MODEL_ARN=$(aws sagemaker list-model-packages \
+                      --model-package-group-name "$MODEL_PACKAGE_GROUP_NAME" \
+                      --model-approval-status Approved \
+                      --sort-by CreationTime \
+                      --sort-order Descending \
+                      --max-results 1 \
+                      --query 'ModelPackageSummaryList[0].ModelPackageArn' \
+                      --output text)
+
+                    if [ "$MODEL_ARN" = "None" ] || [ -z "$MODEL_ARN" ]; then
+                      echo "❌ No approved model package found in group: $MODEL_PACKAGE_GROUP_NAME"
+                      exit 1
+                    fi
+
+                    echo "✅ Found approved model package: $MODEL_ARN"
+                    echo "model_package_arn=$MODEL_ARN" >> $GITHUB_OUTPUT
+                  fi
+
+            - name: Get model package details
+              id: model_details
+              env:
+                  MODEL_PACKAGE_ARN: ${{ steps.get_model.outputs.model_package_arn }}
+              run: |
+                  echo "Fetching model package details..."
+
+                  # Get model data URL (S3 location of model artifacts)
+                  MODEL_DATA_URL=$(aws sagemaker describe-model-package \
+                    --model-package-name "$MODEL_PACKAGE_ARN" \
+                    --query 'InferenceSpecification.Containers[0].ModelDataUrl' \
+                    --output text)
+
+                  echo "Model data URL: $MODEL_DATA_URL"
+                  echo "model_data_url=$MODEL_DATA_URL" >> $GITHUB_OUTPUT
+
+                  # Extract adapter S3 URI if it exists in model metadata
+                  ADAPTER_URI=$(aws sagemaker describe-model-package \
+                    --model-package-name "$MODEL_PACKAGE_ARN" \
+                    --query 'CustomerMetadataProperties.adapter_s3_uri' \
+                    --output text 2>/dev/null || echo "")
+
+                  if [ "$ADAPTER_URI" != "None" ] && [ -n "$ADAPTER_URI" ]; then
+                    echo "Adapter S3 URI: $ADAPTER_URI"
+                    echo "adapter_s3_uri=$ADAPTER_URI" >> $GITHUB_OUTPUT
+                  else
+                    echo "No adapter S3 URI found in model metadata"
+                    echo "adapter_s3_uri=" >> $GITHUB_OUTPUT
+                  fi
+
+            - name: CDK Bootstrap (if needed)
+              env:
+                  REGION: ${{ vars.REGION }}
+              run: |
+                  echo "Checking CDK bootstrap status..."
+
+                  # Check if CDK is already bootstrapped
+                  if aws cloudformation describe-stacks \
+                    --stack-name CDKToolkit \
+                    --region "$REGION" >/dev/null 2>&1; then
+                    echo "✅ CDK already bootstrapped in region $REGION"
+                  else
+                    echo "Bootstrapping CDK in region $REGION..."
+                    cdk bootstrap aws://$(aws sts get-caller-identity --query Account --output text)/$REGION
+                  fi
+
+            - name: CDK Synth
+              env:
+                  SAGEMAKER_PROJECT_NAME: ${{ vars.SAGEMAKER_PROJECT_NAME }}
+                  SAGEMAKER_PROJECT_ID: ${{ vars.SAGEMAKER_PROJECT_ID }}
+                  MODEL_PACKAGE_ARN: ${{ steps.get_model.outputs.model_package_arn }}
+                  ADAPTER_S3_URI: ${{ steps.model_details.outputs.adapter_s3_uri }}
+                  HUGGING_FACE_HUB_TOKEN: ${{ secrets.HUGGING_FACE_HUB_TOKEN }}
+                  REGION: ${{ vars.REGION }}
+              run: |
+                  echo "Synthesizing CDK stack..."
+                  cdk synth
+
+            - name: CDK Deploy
+              env:
+                  SAGEMAKER_PROJECT_NAME: ${{ vars.SAGEMAKER_PROJECT_NAME }}
+                  SAGEMAKER_PROJECT_ID: ${{ vars.SAGEMAKER_PROJECT_ID }}
+                  MODEL_PACKAGE_ARN: ${{ steps.get_model.outputs.model_package_arn }}
+                  ADAPTER_S3_URI: ${{ steps.model_details.outputs.adapter_s3_uri }}
+                  HUGGING_FACE_HUB_TOKEN: ${{ secrets.HUGGING_FACE_HUB_TOKEN }}
+                  REGION: ${{ vars.REGION }}
+                  ENVIRONMENT: ${{ github.event.inputs.environment || 'dev' }}
+              run: |
+                  echo "Deploying endpoint to $ENVIRONMENT environment..."
+
+                  STACK_NAME="esg-${SAGEMAKER_PROJECT_ID}-${ENVIRONMENT}"
+
+                  cdk deploy \
+                    --require-approval never \
+                    --outputs-file cdk-outputs.json \
+                    "$STACK_NAME"
+
+                  echo "✅ Deployment completed successfully"
+
+            - name: Get endpoint details
+              id: endpoint
+              run: |
+                  if [ -f cdk-outputs.json ]; then
+                    ENDPOINT_NAME=$(jq -r '.[].EndpointName // empty' cdk-outputs.json)
+
+                    if [ -n "$ENDPOINT_NAME" ]; then
+                      echo "endpoint_name=$ENDPOINT_NAME" >> $GITHUB_OUTPUT
+                      echo "✅ Endpoint deployed: $ENDPOINT_NAME"
+                    else
+                      echo "⚠️  Could not extract endpoint name from CDK outputs"
+                    fi
+                  fi
+
+            - name: Wait for endpoint to be in service
+              env:
+                  ENDPOINT_NAME: ${{ steps.endpoint.outputs.endpoint_name }}
+                  REGION: ${{ vars.REGION }}
+              run: |
+                  if [ -z "$ENDPOINT_NAME" ]; then
+                    echo "⚠️  Endpoint name not available, skipping status check"
+                    exit 0
+                  fi
+
+                  echo "Waiting for endpoint to be in service..."
+                  MAX_WAIT_TIME=1800  # 30 minutes
+                  WAIT_INTERVAL=30
+                  ELAPSED_TIME=0
+
+                  while [ $ELAPSED_TIME -lt $MAX_WAIT_TIME ]; do
+                    STATUS=$(aws sagemaker describe-endpoint \
+                      --endpoint-name "$ENDPOINT_NAME" \
+                      --query 'EndpointStatus' \
+                      --output text 2>/dev/null || echo "NotFound")
+
+                    echo "$(date '+%H:%M:%S'): Endpoint status: $STATUS (Elapsed: ${ELAPSED_TIME}s)"
+
+                    case "$STATUS" in
+                      "InService")
+                        echo "🎉 Endpoint is now in service!"
+
+                        # Get endpoint details
+                        aws sagemaker describe-endpoint \
+                          --endpoint-name "$ENDPOINT_NAME" \
+                          --query '{Name: EndpointName, Status: EndpointStatus, CreationTime: CreationTime, LastModifiedTime: LastModifiedTime}' \
+                          --output table
+
+                        exit 0
+                        ;;
+                      "Failed")
+                        echo "❌ Endpoint deployment failed"
+
+                        FAILURE_REASON=$(aws sagemaker describe-endpoint \
+                          --endpoint-name "$ENDPOINT_NAME" \
+                          --query 'FailureReason' \
+                          --output text 2>/dev/null)
+
+                        if [ "$FAILURE_REASON" != "None" ] && [ -n "$FAILURE_REASON" ]; then
+                          echo "Failure reason: $FAILURE_REASON"
+                        fi
+
+                        exit 1
+                        ;;
+                      "Creating"|"Updating")
+                        sleep $WAIT_INTERVAL
+                        ELAPSED_TIME=$((ELAPSED_TIME + WAIT_INTERVAL))
+                        ;;
+                      *)
+                        echo "⚠️  Unexpected endpoint status: $STATUS"
+                        sleep $WAIT_INTERVAL
+                        ELAPSED_TIME=$((ELAPSED_TIME + WAIT_INTERVAL))
+                        ;;
+                    esac
+                  done
+
+                  echo "⏰ Timeout reached after ${MAX_WAIT_TIME}s"
+                  echo "Check the SageMaker console for endpoint status:"
+                  echo "https://console.aws.amazon.com/sagemaker/home?region=${REGION}#/endpoints"
+                  exit 1
+
+            - name: Test endpoint (optional)
+              if: success()
+              env:
+                  ENDPOINT_NAME: ${{ steps.endpoint.outputs.endpoint_name }}
+                  REGION: ${{ vars.REGION }}
+              run: |
+                  if [ -z "$ENDPOINT_NAME" ]; then
+                    echo "⚠️  Endpoint name not available, skipping test"
+                    exit 0
+                  fi
+
+                  echo "Testing endpoint with sample payload..."
+
+                  # Create a simple test payload
+                  cat > test_payload.json <<EOF
+                  {
+                    "inputs": "Generate an ESG sustainability report for a technology company.",
+                    "parameters": {
+                      "max_new_tokens": 100,
+                      "temperature": 0.7
+                    }
+                  }
+                  EOF
+
+                  # Invoke the endpoint
+                  aws sagemaker-runtime invoke-endpoint \
+                    --endpoint-name "$ENDPOINT_NAME" \
+                    --body file://test_payload.json \
+                    --content-type application/json \
+                    response.json
+
+                  echo "✅ Endpoint test completed"
+                  echo "Response:"
+                  cat response.json | jq '.' || cat response.json
+
+            - name: Upload deployment artifacts
+              if: always()
+              uses: actions/upload-artifact@50769540e7f4bd5e21e526ee35c689e35e0d6874 # v4.4.0
+              with:
+                  name: deployment-artifacts
+                  path: |
+                      cdk-outputs.json
+                      response.json
+                      cdk.out/
+                  retention-days: 30

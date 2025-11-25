@@ -1,0 +1,17 @@
+torch>=2.0.0
+transformers>=4.30.0
+peft>=0.4.0
+trl>=0.7.0
+datasets>=2.14.0
+pandas>=1.5.0
+numpy>=1.24.0
+accelerate>=0.20.0
+bitsandbytes>=0.41.0
+scipy>=1.10.0
+scikit-learn>=1.2.0
+pyyaml>=6.0
+sentencepiece>=0.2.0
+huggingface-hub>=0.15.0
+sagemaker-mlflow>=0.1.0,<1.0.0
+mlflow>=3.1.0,<4.0.0
+boto3>=1.37.1

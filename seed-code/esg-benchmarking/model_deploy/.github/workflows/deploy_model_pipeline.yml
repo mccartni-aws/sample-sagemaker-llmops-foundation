@@ -1,0 +1,166 @@
+# Deploy ESG model from the registry to a SageMaker endpoint
+name: ESG Model Deploy Pipeline
+run-name: "${{ github.actor }} is deploying ESG model in ${{ github.repository }}"
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  GitHub-Actions-ESG-Deploy:
+    runs-on: ubuntu-latest
+
+    env:
+      DEPLOY_ACCOUNT: "${{ vars.DEPLOY_ACCOUNT }}"
+      AWS_REGION: "${{ vars.REGION }}"
+      MODEL_PACKAGE_GROUP_NAME: "${{ vars.MODEL_PACKAGE_GROUP_NAME }}"
+      SAGEMAKER_PROJECT_ID: "${{ vars.SAGEMAKER_PROJECT_ID }}"
+      SAGEMAKER_PROJECT_NAME: "${{ vars.SAGEMAKER_PROJECT_NAME }}"
+      SAGEMAKER_DOMAIN_ARN: "${{ vars.SAGEMAKER_DOMAIN_ARN }}"
+      ARTIFACT_BUCKET: "${{ vars.ARTIFACT_BUCKET }}"
+      MODEL_BUCKET_ARN: "${{ vars.MODEL_BUCKET_ARN }}"
+      OIDC_ROLE_GITHUB_WORKFLOW: "${{ vars.OIDC_ROLE_GITHUB_WORKFLOW }}"
+      HUGGING_FACE_HUB_TOKEN: "${{ vars.HUGGING_FACE_HUB_TOKEN }}"
+      ADAPTER_S3_URI: "${{ vars.ADAPTER_S3_URI }}"
+
+    steps:
+      - name: Start
+        run: |
+          echo "Trigger: ${{ github.event_name }}"
+          echo "Runner: ${{ runner.os }}"
+          echo "Branch: ${{ github.ref }} | Repo: ${{ github.repository }}"
+          echo "Commit: ${{ github.sha }}"
+
+      - name: Checkout repository
+        uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4.1.7
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@39cd14951b08e74b54015e9e001cdefcf80e669f # v5.1.1
+        with:
+          python-version: "3.11"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
+        with:
+          role-to-assume: ${{ env.OIDC_ROLE_GITHUB_WORKFLOW }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Install dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y nodejs npm jq
+          sudo npm install -g aws-cdk
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+
+      - name: CDK Synth
+        env:
+          AWS_REGION: ${{ env.AWS_REGION }}
+          DEPLOY_ACCOUNT: ${{ env.DEPLOY_ACCOUNT }}
+          SAGEMAKER_PROJECT_NAME: ${{ env.SAGEMAKER_PROJECT_NAME }}
+          SAGEMAKER_PROJECT_ID: ${{ env.SAGEMAKER_PROJECT_ID }}
+          MODEL_PACKAGE_GROUP_NAME: ${{ env.MODEL_PACKAGE_GROUP_NAME }}
+          MODEL_BUCKET_ARN: ${{ env.MODEL_BUCKET_ARN }}
+          SAGEMAKER_DOMAIN_ARN: ${{ env.SAGEMAKER_DOMAIN_ARN }}
+        run: |
+          echo "CDK synth..."
+          python -c "import importlib; importlib.import_module('config.constants')" && echo "config.constants import OK" || echo "config.constants not found (continuing)"
+          cdk synth --no-lookups
+          echo "CDK synth complete"
+
+      - name: Ensure CDK bootstrap
+        env:
+          AWS_REGION: ${{ env.AWS_REGION }}
+          DEPLOY_ACCOUNT: ${{ env.DEPLOY_ACCOUNT }}
+          OIDC_ROLE_GITHUB_WORKFLOW: ${{ env.OIDC_ROLE_GITHUB_WORKFLOW }}
+          CDK_QUALIFIER: "gitactions"
+        run: |
+          set -euo pipefail
+          echo "Checking CDK bootstrap..."
+          if [[ ! "${OIDC_ROLE_GITHUB_WORKFLOW}" =~ ^arn:aws:iam::[0-9]{12}:role/ ]]; then
+            echo "OIDC_ROLE_GITHUB_WORKFLOW must be a full IAM role ARN"
+            exit 1
+          fi
+          STACK_EXISTS=$(aws cloudformation list-stacks \
+            --stack-status-filter CREATE_COMPLETE UPDATE_COMPLETE \
+            --query "StackSummaries[?StackName=='CDKToolkit-${CDK_QUALIFIER}'].StackName" \
+            --output text || true)
+          if [ -n "$STACK_EXISTS" ] && [ "$STACK_EXISTS" != "None" ]; then
+            echo "Bootstrap stack CDKToolkit-${CDK_QUALIFIER} exists."
+          else
+            echo "Bootstrapping..."
+            cdk bootstrap aws://${DEPLOY_ACCOUNT}/${AWS_REGION} \
+              --toolkit-stack-name CDKToolkit-${CDK_QUALIFIER} \
+              --qualifier ${CDK_QUALIFIER} \
+              --trust ${DEPLOY_ACCOUNT} \
+              --cloudformation-execution-policies arn:aws:iam::aws:policy/AdministratorAccess
+            echo "Bootstrap complete"
+          fi
+
+      - name: Deploy ESG Model Endpoint
+        env:
+          AWS_REGION: ${{ env.AWS_REGION }}
+          DEPLOY_ACCOUNT: ${{ env.DEPLOY_ACCOUNT }}
+          SAGEMAKER_PROJECT_NAME: ${{ env.SAGEMAKER_PROJECT_NAME }}
+          SAGEMAKER_PROJECT_ID: ${{ env.SAGEMAKER_PROJECT_ID }}
+          MODEL_PACKAGE_GROUP_NAME: ${{ env.MODEL_PACKAGE_GROUP_NAME }}
+          ARTIFACT_BUCKET: ${{ env.ARTIFACT_BUCKET }}
+          MODEL_BUCKET_ARN: ${{ env.MODEL_BUCKET_ARN }}
+          SAGEMAKER_DOMAIN_ARN: ${{ env.SAGEMAKER_DOMAIN_ARN }}
+          HUGGING_FACE_HUB_TOKEN: ${{ env.HUGGING_FACE_HUB_TOKEN }}
+          ADAPTER_S3_URI: ${{ env.ADAPTER_S3_URI }}
+          CDK_QUALIFIER: "gitactions"
+        run: |
+          set -euo pipefail
+          echo "Deploying ESG endpoint..."
+          cdk deploy \
+            --require-approval never \
+            --toolkit-stack-name CDKToolkit-${CDK_QUALIFIER} \
+            --context "@aws-cdk/core:bootstrapQualifier=${CDK_QUALIFIER}" \
+            --verbose
+          echo "Deployment finished"
+
+      - name: Validate endpoint
+        env:
+          MODEL_PACKAGE_GROUP_NAME: ${{ env.MODEL_PACKAGE_GROUP_NAME }}
+          SAGEMAKER_PROJECT_NAME: ${{ env.SAGEMAKER_PROJECT_NAME }}
+          AWS_REGION: ${{ env.AWS_REGION }}
+        run: |
+          set -euo pipefail
+          echo "Validating endpoint..."
+          ENDPOINT_NAME="${MODEL_PACKAGE_GROUP_NAME}-${SAGEMAKER_PROJECT_NAME}-endpoint"
+          aws sagemaker wait endpoint-in-service --endpoint-name "$ENDPOINT_NAME" --region "$AWS_REGION"
+          STATUS=$(aws sagemaker describe-endpoint --endpoint-name "$ENDPOINT_NAME" --query 'EndpointStatus' --output text --region "$AWS_REGION")
+          echo "Endpoint Status: $STATUS"
+          if [ "$STATUS" != "InService" ]; then
+            echo "Endpoint deployment failed with status: $STATUS"
+            exit 1
+          fi
+          ARN=$(aws sagemaker describe-endpoint --endpoint-name "$ENDPOINT_NAME" --query 'EndpointArn' --output text --region "$AWS_REGION")
+          echo "Endpoint ARN: $ARN"
+          echo '{"instruction":"Generate an environmental sustainability report for a renewable energy company","input":"Company: GreenTech Solutions, Sector: Renewable Energy, Focus: Solar panel manufacturing and carbon footprint reduction"}' > test_payload.json
+          echo "Sample ESG test payload created: test_payload.json"
+
+      - name: CDK List Deployed Stacks
+        run: |
+          echo "Listing deployed CDK stacks..."
+          cdk list
+
+      - name: Deployment Summary
+        env:
+          AWS_REGION: ${{ env.AWS_REGION }}
+        run: |
+          echo "ESG Model Deployment Summary:"
+          echo "================================"
+          echo "Repository: ${{ github.repository }}"
+          echo "Branch: ${{ github.ref }}"
+          echo "Commit: ${{ github.sha }}"
+          echo "Actor: ${{ github.actor }}"
+          echo "Model Package Group: $MODEL_PACKAGE_GROUP_NAME"
+          echo "Project: $SAGEMAKER_PROJECT_NAME"
+          echo "Region: $AWS_REGION"
+          echo "Job Status: ${{ job.status }}"
