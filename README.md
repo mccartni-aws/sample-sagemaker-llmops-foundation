@@ -1,116 +1,12 @@
-# 🚀 SageMaker LLMOps Platform for HuggingFace Model Fine-Tuning
+# 🚀 LLMOps Foundation for Amazon SageMaker AI LLM Fine-Tuning
 
-> **Reference MLOps implementation for fine-tuning and deploying HuggingFace language models on AWS SageMaker**
+> **Reference LLMOps implementation for fine-tuning and deploying HuggingFace language models on Amazon SageMaker AI**
 
-A reusable accelerator that demonstrates LLM lifecycle orchestration from model fine-tuning to deployment, with automated GitHub repository creation, CI/CD pipelines, and monitoring capabilities. This serves as a foundation that can be customized and hardened for your specific production requirements.
-
-## 📋 What This Platform Provides
-
-This is a **generic LLMOps platform** that can be used for any HuggingFace language model fine-tuning project. It provides:
-
-### Platform Components (Deployed Once, Shared Across Projects)
-
-- **SageMaker Studio Domain** - Development environment for data scientists
-- **GitHub Integration** - Automated repository creation with OIDC authentication
-- **MLflow Tracking** - Centralized experiment tracking and model registry
-- **Event-Driven Automation** - EventBridge + Lambda + Step Functions orchestration
-- **Observability Stack** - CloudWatch dashboards, SNS notifications, Slack integration
-
-### Project Templates (Instantiated Per Use Case)
-
-- **CloudFormation Template** - Creates project-specific resources (Model Package Group, S3 buckets)
-- **Seed Code Repositories** - Pre-configured training and deployment pipelines
-- **GitHub Actions Workflows** - CI/CD automation for model lifecycle
-
-### Included Example: ESG Report Summarization
-
-The platform includes a complete example demonstrating fine-tuning Mistral-7B for ESG sustainability report summarization. This serves as a reference implementation showing how to use the platform for your own use cases.
-
-## 🔧 Configuration
-
-### Required Configuration
-
-Before deploying, you **must** configure your target GitHub organization where project repositories will be created:
-
-> **Important:** This platform is designed as a reference implementation and accelerator. Review and customize the configuration for your specific security, compliance, and operational requirements before use.
-
-```bash
-# REQUIRED: Set your target GitHub organization
-export TARGET_GITHUB_ORG="your-github-org"
-
-# REQUIRED: Set your GitHub Personal Access Token
-export GITHUB_TOKEN="ghp_your_github_token_here"
-```
-
-**Why is TARGET_GITHUB_ORG required?**
-
-- This is where the platform will create repositories for each SageMaker project
-- There is no sensible default - it must be your organization
-- The platform will fail to deploy without this configuration
-
-### Optional Configuration
-
-The platform uses sensible defaults, but you can customize if needed:
-
-```python
-# Edit sm-cdk/llmops_sm/config.py
-
-GitConfig(
-    # Template source (defaults to aws-samples for production)
-    template_github_org="aws-samples",  # Where to get seed code templates
-    template_github_repo="llmops-finetuning-foundation",
-    template_code_folder="seed-code",
-
-    # Target organization (REQUIRED - set via environment variable)
-    target_github_org=None,  # Set via TARGET_GITHUB_ORG env var
-
-    # GitHub token (stored in AWS Secrets Manager)
-    github_token_secret_name="llmops-sm-github-token",
-)
-```
-
-**Parameter Definitions:**
-
-- `template_github_org`: Organization hosting the seed code templates (default: `aws-samples` for reference templates)
-- `template_github_repo`: Repository containing seed code templates
-- `template_code_folder`: Folder within template repo containing seed code
-- `target_github_org`: **YOUR** organization where project repos will be created (REQUIRED)
-
-**For Custom Templates:**
-If you've forked this repository to customize templates for your organization:
-
-```bash
-export TEMPLATE_GITHUB_ORG="your-custom-org"
-```
-
-## ⚡ Quick Start
-
-Deploy the complete LLMOps platform with a single command:
-
-```bash
-# 1. Set required environment variables
-export TARGET_GITHUB_ORG="your-github-org"
-export GITHUB_TOKEN="ghp_your_github_token_here"
-
-# 2. (Optional) Set AWS region - defaults to your configured AWS CLI region
-aws configure set region us-west-2
-
-# 3. Ensure Docker Desktop is running
-docker info
-
-# 4. Deploy everything (handles CDK bootstrap, Docker images, and all 3 stacks)
-make deploy
-```
-
-The `make deploy` command automatically handles CDK bootstrap, pulls required Docker images, validates environment variables, and deploys all infrastructure in the correct order.
-
-## 🏗️ What This Platform Does
-
-This platform automatically creates a complete MLOps workflow when you create a SageMaker project:
+This repo conatins a reusable accelerator that demonstrates LLM lifecycle orchestration from model fine-tuning to deployment, with automated GitHub repository creation, CI/CD pipelines, and monitoring capabilities. This serves as a foundation that can be customized and hardened for your specific production requirements.
 
 ## Architecture Overview
 
-The ESG benchmarking model build pipeline follows a comprehensive MLOps architecture that integrates GitHub Actions with SageMaker services for automated model training and registration.
+This diagram showcases an LLMOps architecture that integrates GitHub Actions with SageMaker services for automated data preprocessing, model training, model evaluation and registration.
 
 ![GitHub Actions MLOps Architecture](diagrams/sm_studio_mlops.jpg)
 
@@ -199,6 +95,115 @@ The platform uses a **two-layer architecture** to separate reusable infrastructu
 └─────────────────────────────────────────────────────────────────┘
 ```
 
+## 📋 What This Platform Provides
+
+This is a **generic LLMOps platform** that can be used for any HuggingFace language model fine-tuning project. It provides:
+
+### Platform Components (Deployed Once, Shared Across Projects)
+
+- **SageMaker Studio Domain** - Development environment for data scientists
+- **GitHub Integration** - Automated repository creation with OIDC authentication
+- **MLflow Tracking** - Centralized experiment tracking and model registry
+- **Event-Driven Automation** - EventBridge + Lambda + Step Functions orchestration
+- **Observability Stack** - CloudWatch dashboards, SNS notifications, Slack integration
+
+### Project Templates (Instantiated Per Use Case)
+
+- **CloudFormation Template** - Creates project-specific resources (Model Package Group, S3 buckets)
+- **Seed Code Repositories** - Pre-configured training and deployment pipelines
+- **GitHub Actions Workflows** - CI/CD automation for model lifecycle
+
+### Included Example: ESG Report Summarization
+
+The platform includes a complete example demonstrating fine-tuning Mistral-7B for ESG sustainability report summarization. This serves as a reference implementation showing how to use the platform for your own use cases.
+
+## ⚡ Quick Start
+
+### Prerequisites
+
+Before running `make deploy`, ensure you have:
+
+- **AWS Account** with appropriate permissions
+- **Docker Desktop** running
+- **GitHub Organization** where repositories will be created
+- **GitHub Personal Access Token** (see detailed permissions below)
+
+Deploy the complete LLMOps platform with just a few commands:
+
+```bash
+# 1. Set required environment variables
+export TARGET_GITHUB_ORG="your-github-org"
+export GITHUB_TOKEN="ghp_your_github_token_here"
+
+# 2. (Optional) Set AWS region - defaults to your configured AWS CLI region
+aws configure set region us-west-2
+
+# 3. Ensure Docker Desktop is running
+docker info
+
+# 4. Deploy everything (handles CDK bootstrap, Docker images, and all 3 stacks)
+make deploy
+```
+
+The `make deploy` command automatically handles CDK bootstrap, pulls required Docker images, validates environment variables, and deploys all infrastructure in the correct order.
+
+## 🔧 Configuration
+
+### Required Configuration
+
+Before deploying, you **must** configure your target GitHub organization where project repositories will be created:
+
+> **Important:** This platform is designed as a reference implementation and accelerator. Review and customize the configuration for your specific security, compliance, and operational requirements before use.
+
+```bash
+# REQUIRED: Set your target GitHub organization
+export TARGET_GITHUB_ORG="your-github-org"
+
+# REQUIRED: Set your GitHub Personal Access Token
+export GITHUB_TOKEN="ghp_your_github_token_here"
+```
+
+**Why is TARGET_GITHUB_ORG required?**
+
+- This is where the platform will create repositories for each SageMaker project
+- There is no sensible default - it must be your organization
+- The platform will fail to deploy without this configuration
+
+### Optional Configuration
+
+The platform uses sensible defaults, but you can customize if needed:
+
+```python
+# Edit sm-cdk/llmops_sm/config.py
+
+GitConfig(
+    # Template source (defaults to aws-samples for production)
+    template_github_org="aws-samples",  # Where to get seed code templates
+    template_github_repo="llmops-finetuning-foundation",
+    template_code_folder="seed-code",
+
+    # Target organization (REQUIRED - set via environment variable)
+    target_github_org=None,  # Set via TARGET_GITHUB_ORG env var
+
+    # GitHub token (stored in AWS Secrets Manager)
+    github_token_secret_name="llmops-sm-github-token",
+)
+```
+
+**Parameter Definitions:**
+
+- `template_github_org`: Organization hosting the seed code templates (default: `aws-samples` for reference templates)
+- `template_github_repo`: Repository containing seed code templates
+- `template_code_folder`: Folder within template repo containing seed code
+- `target_github_org`: **YOUR** organization where project repos will be created (REQUIRED)
+
+**For Custom Templates:**
+If you've forked this repository to customize templates for your organization:
+
+```bash
+export TEMPLATE_GITHUB_ORG="your-custom-org"
+```
+
 ### Why This Architecture?
 
 **Q: Why split the template between CloudFormation and Step Functions?**
@@ -276,17 +281,6 @@ llmops-finetuning-foundation/
 - `seed-code/` - Template code copied to new GitHub repositories
 - `sm-cdk/` - Platform infrastructure (deployed once)
 - `sm-cdk/templates/` - Project templates (instantiated per project)
-
-## 🚀 Getting Started
-
-### Prerequisites
-
-Before running `make deploy`, ensure you have:
-
-- **AWS Account** with appropriate permissions
-- **Docker Desktop** running
-- **GitHub Organization** where repositories will be created
-- **GitHub Personal Access Token** (see detailed permissions below)
 
 ### GitHub Personal Access Token (PAT) Requirements
 
@@ -374,74 +368,7 @@ The Lambda functions use your GitHub token to:
 | `404 Not Found`            | Token can't access repository | Grant token access to template repository        |
 | `422 Unprocessable Entity` | Repository already exists     | Delete existing repository or use different name |
 
-### Step 1: Configure Your Environment
-
-```bash
-# Clone the repository
-git clone https://github.com/aws-samples/sample-smai-llmops.git
-cd sample-smai-llmops
-
-# Set required GitHub token
-export GITHUB_TOKEN="ghp_your_github_personal_access_token"
-
-# Verify Docker is running
-docker info
-```
-
-### Step 2: Deploy the Platform
-
-```bash
-# Deploy everything with one command
-make deploy
-```
-
-This command will:
-
-- ✅ Set up Python virtual environment
-- ✅ Install all dependencies
-- ✅ Build Lambda layers
-- ✅ Bootstrap CDK environment
-- ✅ Deploy all three stacks in correct order
-- ✅ Configure GitHub integration
-
-### Step 3: Create Your First Project
-
-1. **Open SageMaker Studio**
-
-   ```bash
-   # Get your domain URL from the deployment output
-   aws sagemaker list-domains --query 'Domains[0].Url' --output text
-   ```
-
-2. **Create New Project**
-
-   - Go to SageMaker Studio → Projects
-   - Click "Create Project"
-   - Select "ESG Benchmarking Template"
-   - Enter project name (e.g., `my-esg-model`)
-
-3. **Automated Repository Setup** ✨
-   - Platform automatically creates GitHub repositories
-   - Populates them with ESG seed code
-   - Sets up CI/CD workflows
-   - Configures necessary variables and secrets
-
-### Step 4: Train Your First Model
-
-```bash
-# Clone your auto-generated build repository
-git clone https://github.com/YOUR_ORG/my-esg-model-build.git
-cd my-esg-model-build
-
-# Make a change to trigger training
-echo "# Updated model" >> README.md
-git add . && git commit -m "Trigger training pipeline"
-git push
-
-# Watch training progress in GitHub Actions
-```
-
-## 🛠️ Available Commands
+## 🛠️ Available Makefile Commands
 
 ### Setup & Deployment
 
