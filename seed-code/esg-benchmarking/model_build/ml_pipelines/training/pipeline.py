@@ -16,10 +16,10 @@ def create_pipeline_definition():
     # Default configuration
     config = {
         "region": "us-east-1",
-        "default_bucket": "sagemaker-esg-pipeline",
-        "model_package_group_name": "esg-models",
-        "pipeline_name": "esg-benchmarking-pipeline",
-        "base_job_prefix": "esg",
+        "default_bucket": "sagemaker-susgen-pipeline",
+        "model_package_group_name": "susgen-esg-models",
+        "pipeline_name": "susgen-esg-benchmarking-pipeline",
+        "base_job_prefix": "susgen-esg",
     }
 
     pipeline = get_pipeline(**config)
@@ -36,27 +36,27 @@ def get_pipeline(
     role=None,
     default_bucket=None,
     esg_data_bucket=None,
-    model_package_group_name="esg-models",
-    pipeline_name="esg-pipeline",
-    base_job_prefix="esg",
-    input_data_path=None,
+    model_package_group_name="susgen-esg-models",
+    pipeline_name="susgen-esg-pipeline",
+    base_job_prefix="susgen-esg",
     # Direct parameter values instead of ParameterString objects
-    processing_instance_type="ml.g5.2xlarge",  # "ml.m5.4xlarge"
-    processing_instance_count=1,
-    training_instance_type="ml.g5.24xlarge",
-    # training_instance_type="ml.g5.12xlarge",
-    # training_instance_type="ml.p4d.24xlarge",
+    preprocessing_instance_type="ml.m5.4xlarge",
+    preprocessing_instance_count=1,
+    training_instance_type="ml.g5.2xlarge",
     training_instance_count=1,
+    evaluate_instance_type="ml.c7i.48xlarge",  # "ml.g5.2xlarge",
+    evaluate_instance_count=1,
     model_approval_status="PendingManualApproval",
-    base_model_name="mistralai/Mistral-7B-Instruct-v0.3",
+    base_model_name="unsloth/mistral-7b-v0.3",
     prompt_template="mistral_formal",
-    max_length=256,
-    num_train_epochs=3,
+    max_length=512,
+    num_train_epochs=1,
     learning_rate=2e-4,
     lora_r=16,
-    lora_alpha=32,
-    quantization="int8",
+    lora_alpha=16,
+    hf_token="",
     mlflow_tracking_arn=None,
+    input_data_path=None,
 ):
     """
     Gets a SageMaker ML Pipeline instance for SusGen ESG model training.
@@ -78,16 +78,18 @@ def get_pipeline(
     import boto3
     import sagemaker
     from sagemaker import get_execution_role
-    from sagemaker.session import Session
+    from sagemaker.workflow.pipeline_context import PipelineSession
     from sagemaker.inputs import TrainingInput
     from sagemaker.model_metrics import MetricsSource, ModelMetrics
-    from sagemaker.processing import ProcessingInput, ProcessingOutput, ScriptProcessor
+    from sagemaker.processing import (
+        ProcessingInput,
+        ProcessingOutput,
+        FrameworkProcessor,
+    )
 
     from sagemaker.pytorch import PyTorch
-    from sagemaker.pytorch.processing import PyTorchProcessor
-    from sagemaker.workflow.conditions import ConditionLessThanOrEqualTo
     from sagemaker.workflow.condition_step import ConditionStep
-    from sagemaker.workflow.functions import JsonGet, Join
+    from sagemaker.workflow.functions import JsonGet
     from sagemaker.workflow.pipeline import Pipeline
     from sagemaker.workflow.properties import PropertyFile
     from sagemaker.workflow.steps import ProcessingStep, TrainingStep
@@ -99,7 +101,7 @@ def get_pipeline(
 
     # Create SageMaker session with the provided bucket to prevent auto-creation
     boto_session = boto3.Session(region_name=region)
-    sagemaker_session = Session(
+    sagemaker_session = PipelineSession(
         boto_session=boto_session, default_bucket=default_bucket
     )
 
@@ -136,77 +138,96 @@ def get_pipeline(
 
     print(f"🔧 MLflow Tracking ARN: {mlflow_tracking_arn or 'Not configured'}")
 
+    pytorch_version = "2.8"
+    pytorch_python_version = "py312"
+
+    pytorch_image_uri_preprocessing = sagemaker.image_uris.retrieve(
+        framework="pytorch",
+        region=region,
+        image_scope="training",
+        version=pytorch_version,
+        py_version=pytorch_python_version,
+        instance_type=preprocessing_instance_type,
+    )
+
     # # Step 1: Combined Data Download and Preprocessing
-    script_data_processor = ScriptProcessor(
-        image_uri=sagemaker.image_uris.retrieve(
-            framework="sklearn",
-            region=region,
-            version="1.0-1",
-            py_version="py3",
-            instance_type="ml.m5.4xlarge",
-        ),
-        instance_type=processing_instance_type,
-        instance_count=processing_instance_count,
+    pytorch_data_processor = FrameworkProcessor(
+        estimator_cls=PyTorch,
+        framework_version=pytorch_version,
+        image_uri=pytorch_image_uri_preprocessing,
+        instance_type=preprocessing_instance_type,
+        instance_count=preprocessing_instance_count,
         base_job_name=f"{base_job_prefix}-data-preprocessing",
         command=["python3"],
         sagemaker_session=sagemaker_session,
         role=role,
-        # output_kms_key=bucket_kms_id,
     )
 
-    step_data_prep = ProcessingStep(
-        name="ESGDataPreprocessing",
-        processor=script_data_processor,
+    preprocessing_step_args = pytorch_data_processor.run(
         outputs=[
             ProcessingOutput(
                 output_name="train",
                 source="/opt/ml/processing/train",
-                destination=f"s3://{data_bucket}/esg-train",
+                destination=f"s3://{data_bucket}/susgen-train",
             ),
             ProcessingOutput(
                 output_name="validation",
                 source="/opt/ml/processing/validation",
-                destination=f"s3://{data_bucket}/esg-validation",
+                destination=f"s3://{data_bucket}/susgen-validation",
             ),
             ProcessingOutput(
                 output_name="test",
                 source="/opt/ml/processing/test",
-                destination=f"s3://{data_bucket}/esg-test",
+                destination=f"s3://{data_bucket}/susgen-test",
             ),
         ],
-        code="source_scripts/data/preprocess_data.py",
-        job_arguments=[
-            "--dataset-id",
-            "WHATX/SusGen-30k",
+        source_dir="source_scripts/preprocess/",
+        code="preprocess.py",
+        arguments=[
             "--output-dir",
             "/opt/ml/processing",
-            "--prompt-template",
-            str(prompt_template),
+            "--dataset-name",
+            "WHATX/SusGen-30k",
             "--max-length",
             str(max_length),
         ],
     )
 
+    step_data_prep = ProcessingStep(
+        name="SusGenDataPreprocessing", step_args=preprocessing_step_args
+    )
+
     # Step 3: Model Training with LoRA
-    model_path = f"s3://{default_bucket}/esg-training-jobs"
+    model_path = f"s3://{default_bucket}/susgen-training-jobs"
 
     hyperparameters = {
         "model-name": base_model_name,
         "num-train-epochs": num_train_epochs,
-        "per-device-train-batch-size": 1,
-        "per-device-eval-batch-size": 2,
-        "gradient-accumulation-steps": 32,
+        "max-steps": 100,
+        "per-device-train-batch-size": 4,
+        "per-device-eval-batch-size": 4,
+        "gradient-accumulation-steps": 2,
         "learning-rate": learning_rate,
-        "warmup-steps": 100,
+        "warmup-steps": 5,
         "logging-steps": 10,
-        "max-length": max_length,
+        "max-seq-length": max_length,
         "lora-r": lora_r,
         "lora-alpha": lora_alpha,
-        "lora-dropout": 0.1,
-        "quantization": quantization,
-        "prompt-template": prompt_template,
-        "train-sample-fraction": "0.01",
+        "lora-dropout": 0,
+        "load-in-4bit": True,
+        "optim": "adamw_8bit",
+        "seed": 42,
+        "save-strategy": "no",
     }
+
+    pytorch_image_uri_training = sagemaker.image_uris.retrieve(
+        framework="pytorch",
+        region=region,
+        image_scope="training",
+        version=pytorch_version,
+        py_version=pytorch_python_version,
+        instance_type=training_instance_type,
+    )
 
     pytorch_estimator = PyTorch(
         entry_point="train.py",
@@ -214,17 +235,11 @@ def get_pipeline(
         instance_type=training_instance_type,
         instance_count=training_instance_count,
         role=role,
-        framework_version="2.0.1",
-        py_version="py310",
-        # distribution={
-        #     "torch_distributed": {
-        #         "enabled": True
-        #     }
-        # },
+        image_uri=pytorch_image_uri_training,
         sagemaker_session=sagemaker_session,
         hyperparameters=hyperparameters,
         output_path=model_path,
-        base_job_name=f"{base_job_prefix}-training",
+        base_job_name=f"{base_job_prefix}-susgen-training",
         disable_profiler=True,
         debugger_hook_config=False,
         environment=(
@@ -232,9 +247,7 @@ def get_pipeline(
         ),
     )
 
-    step_train = TrainingStep(
-        name="ESGModelTraining",
-        estimator=pytorch_estimator,
+    train_step_args = pytorch_estimator.fit(
         inputs={
             "train": TrainingInput(
                 s3_data=step_data_prep.properties.ProcessingOutputConfig.Outputs[
@@ -251,33 +264,37 @@ def get_pipeline(
         },
     )
 
+    step_train = TrainingStep(name="SusGenModelTraining", step_args=train_step_args)
+
+    pytorch_image_uri_evaluate = sagemaker.image_uris.retrieve(
+        framework="pytorch",
+        region=region,
+        image_scope="training",
+        version=pytorch_version,
+        py_version=pytorch_python_version,
+        instance_type=evaluate_instance_type,
+    )
+
     # Step 4: Model Evaluation
-    pytorch_eval_processor = ScriptProcessor(
-        image_uri=sagemaker.image_uris.retrieve(
-            framework="pytorch",
-            region=region,
-            image_scope="training",
-            version="2.0.1",
-            py_version="py310",
-            instance_type=processing_instance_type,
-        ),
-        instance_type=processing_instance_type,
-        instance_count=1,
-        base_job_name=f"{base_job_prefix}-eval",
+    pytorch_eval_processor = FrameworkProcessor(
+        estimator_cls=PyTorch,
+        framework_version=pytorch_version,
+        image_uri=pytorch_image_uri_evaluate,
+        instance_type=evaluate_instance_type,
+        instance_count=evaluate_instance_count,
+        base_job_name=f"{base_job_prefix}-susgen-eval",
         command=["python3"],
         sagemaker_session=sagemaker_session,
         role=role,
     )
 
     evaluation_report = PropertyFile(
-        name="ESGEvaluationReport",
+        name="SusGenEvaluationReport",
         output_name="evaluation",
         path="evaluation.json",
     )
 
-    step_eval = ProcessingStep(
-        name="ESGModelEvaluation",
-        processor=pytorch_eval_processor,
+    evaluate_step_args = pytorch_eval_processor.run(
         inputs=[
             ProcessingInput(
                 source=step_train.properties.ModelArtifacts.S3ModelArtifacts,
@@ -295,15 +312,29 @@ def get_pipeline(
                 output_name="evaluation", source="/opt/ml/processing/evaluation"
             ),
         ],
-        code="source_scripts/evaluate/evaluate.py",
-        job_arguments=[
+        source_dir="source_scripts/evaluate/",
+        code="evaluate.py",
+        arguments=[
             "--model-path",
             "/opt/ml/processing/model",
             "--output-path",
             "/opt/ml/processing/evaluation",
-            "--max-samples",
-            "100",  # Reduced for faster evaluation
+            "--num-batches",
+            "10",
+            "--batch-size",
+            "4",
+            "--max-seq-length",
+            str(max_length),
+            "--max-new-tokens",
+            "16",
+            "--load-in-4bit",
+            "true",
         ],
+    )
+
+    step_eval = ProcessingStep(
+        name="SusGenModelEvaluation",
+        step_args=evaluate_step_args,
         property_files=[evaluation_report],
     )
 
@@ -321,18 +352,18 @@ def get_pipeline(
 
     # Step 5: Model Registration
     step_register = RegisterModel(
-        name="ESGModelRegistration",
+        name="SusGenModelRegistration",
         estimator=pytorch_estimator,
         model_data=step_train.properties.ModelArtifacts.S3ModelArtifacts,
         content_types=["text/csv", "application/json"],
         response_types=["text/csv", "application/json"],
-        inference_instances=["ml.t2.medium", "ml.m5.large", "ml.g4dn.xlarge"],
+        inference_instances=["ml.g5.2xlarge", "ml.m5.large", "ml.g4dn.xlarge"],
         transform_instances=["ml.m5.large"],
         model_package_group_name=model_package_group_name,
         approval_status=model_approval_status,
         model_metrics=model_metrics,
         description=(
-            "ESG model trained with LoRA fine-tuning - "
+            "SusGen ESG model trained with LoRA fine-tuning - "
             "automatically registered from pipeline"
         ),
         model_card=None,
@@ -352,13 +383,13 @@ def get_pipeline(
         left=JsonGet(
             step_name=step_eval.name,
             property_file=evaluation_report,
-            json_path="classification_metrics.accuracy.value",  # This matches your evaluate.py output
+            json_path="rouge_metrics.rougeL.value",
         ),
         right=0.0,  # Accept any accuracy >= 0% (always passes)
     )
 
     step_cond = ConditionStep(
-        name="ESGModelQualityCheck",
+        name="SusGenModelQualityCheck",
         conditions=[cond_gte],
         if_steps=[step_register],
         else_steps=[],

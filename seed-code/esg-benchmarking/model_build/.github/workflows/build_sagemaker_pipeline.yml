@@ -55,13 +55,12 @@ jobs:
           ARTIFACT_BUCKET: ${{ vars.ARTIFACT_BUCKET }}
           MODEL_PACKAGE_GROUP_NAME: ${{ vars.MODEL_PACKAGE_GROUP_NAME }}
           INPUT_DATA_PATH: ${{ vars.INPUT_DATA_PATH }}
-          MLFLOW_TRACKING_ARN: ${{ vars.MLFLOW_TRACKING_ARN }}
         run: |
           python ./ml_pipelines/run_pipeline.py \
             --module-name training.pipeline \
             --role-arn "${{ env.ROLE }}" \
             --tags '[{"Key":"sagemaker:project-name", "Value":"'"${{ env.SAGEMAKER_PROJECT_NAME }}"'"}, {"Key":"sagemaker:project-id", "Value":"'"${{ env.SAGEMAKER_PROJECT_ID }}"'"}]' \
-            --kwargs '{"region":"'"${{ env.REGION }}"'","default_bucket":"'"${{ env.ARTIFACT_BUCKET }}"'","pipeline_name":"githubactions-'"${{ env.SAGEMAKER_PROJECT_ID }}"'","model_package_group_name":"'"${{ env.MODEL_PACKAGE_GROUP_NAME }}"'","input_data_path":"'"${{ env.INPUT_DATA_PATH }}"'", "mlflow_tracking_arn":"'"${{ env.MLFLOW_TRACKING_ARN }}"'"}'
+            --kwargs '{"region":"'"${{ env.REGION }}"'","default_bucket":"'"${{ env.ARTIFACT_BUCKET }}"'","pipeline_name":"githubactions-'"${{ env.SAGEMAKER_PROJECT_ID }}"'","model_package_group_name":"'"${{ env.MODEL_PACKAGE_GROUP_NAME }}"'","input_data_path":"'"${{ env.INPUT_DATA_PATH }}"'"}'
 
       - name: Monitor Pipeline Execution
         env:
